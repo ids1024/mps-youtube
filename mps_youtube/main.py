@@ -772,6 +772,9 @@ class RedirectStdinThread(threading.Thread):
             os.write(self.fd, char.encode())
             if char in 'kjqpn':
                 break
+            if char == '\x1b': # esc
+                g.player_to_background = True
+                break
 
 
 class g(object):
@@ -795,6 +798,7 @@ class g(object):
     browse_mode = "normal"
     preloading = []
     redirect_thread = None
+    player_to_background = False
     # expiry = 5 * 60 * 60  # 5 hours
     blank_text = "\n" * 200
     helptext = []
@@ -2031,7 +2035,10 @@ def launch_player(song, songdata, cmd):
             g.redirect_thread = RedirectStdinThread(p.stdin.fileno())
             g.redirect_thread.start()
             played = player_status(p, songdata + "; ", song.length)
-            returncode = p.wait()
+            if g.player_to_background:
+                returncode = 'background' 
+            else:
+                returncode = p.wait()
 
         elif "mpv" in Config.PLAYER.get:
             cmd.append('--input-conf='+input_file)
@@ -2057,7 +2064,10 @@ def launch_player(song, songdata, cmd):
             g.redirect_thread.start()
             played = player_status(p, songdata + "; ", song.length, mpv=True,
                                    sockpath=sockpath)
-            returncode = p.wait()
+            if g.player_to_background:
+                returncode = 'background'
+            else:
+                returncode = p.wait()
 
         else:
             with open(os.devnull, "w") as devnull:
@@ -2080,10 +2090,13 @@ def launch_player(song, songdata, cmd):
             os.unlink(input_file)
             if sockpath:
                 os.unlink(sockpath)
-            p.terminate()  # make sure to kill mplayer if mpsyt crashes
+
+            if not g.player_to_background:
+                p.terminate()  # make sure to kill mplayer if mpsyt crashes
 
         except (OSError, AttributeError, UnboundLocalError):
             pass
+        g.player_to_background = False
 
 
 def player_status(po_obj, prefix, songlength=0, mpv=False, sockpath=None):
@@ -2116,11 +2129,13 @@ def player_status(po_obj, prefix, songlength=0, mpv=False, sockpath=None):
                     if line != last_displayed_line:
                         writestatus(line)
                         last_displayed_line = line
+                if g.player_to_background:
+                    break
         except socket.error:
             pass
 
     else:
-        while po_obj.poll() is None:
+        while po_obj.poll() is None and not g.player_to_background:
             stdstream = po_obj.stderr if mpv else po_obj.stdout
             char = stdstream.read(1).decode("utf-8", errors="ignore")
 
@@ -3171,7 +3186,7 @@ def play_range(songlist, shuffle=False, repeat=False, override=False):
         if returncode == 42:
             n -= 1
 
-        elif returncode == 43:
+        elif returncode in (43, 'background'):
             break
 
         else:
