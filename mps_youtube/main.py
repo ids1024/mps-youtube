@@ -75,6 +75,28 @@ try:
 except ImportError:
     has_xerox = False
 
+try:
+    import pty
+    has_pty = True
+except ImportError:
+    has_pty = False
+
+try:
+    from msvcrt import getch
+except ImportError:
+    def getch():
+        import tty
+        import termios
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        mode = old.copy()
+        mode[tty.LFLAG] &= ~(termios.ECHO | termios.ICANON)
+        try:
+            termios.tcsetattr(fd, termios.TCSAFLUSH, mode)
+            return sys.stdin.read(1)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
 # Python 3 compatibility hack
 
 if sys.version_info[:2] >= (3, 0):
@@ -734,6 +756,24 @@ class Playlist(object):
         return duration
 
 
+class RedirectStdinThread(threading.Thread):
+    _continue = True
+
+    def __init__(self, fd):
+        self.fd = fd
+        threading.Thread.__init__(self)
+
+    def stop(self):
+        self._continue = False
+
+    def run(self):
+        while self._continue:
+            char = getch()
+            os.write(self.fd, char.encode())
+            if char in 'kjqpn':
+                break
+
+
 class g(object):
 
     """ Class for holding globals that are needed throught the module. """
@@ -754,6 +794,7 @@ class g(object):
     mpv_usesock = False
     browse_mode = "normal"
     preloading = []
+    redirect_thread = None
     # expiry = 5 * 60 * 60  # 5 hours
     blank_text = "\n" * 200
     helptext = []
@@ -1984,8 +2025,11 @@ def launch_player(song, songdata, cmd):
         if "mplayer" in Config.PLAYER.get:
             cmd.append('-input')
             cmd.append('conf='+input_file)
-            p = subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE,
+            p = subprocess.Popen(cmd, shell=False, stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, bufsize=1)
+            g.redirect_thread = RedirectStdinThread(p.stdin.fileno())
+            g.redirect_thread.start()
             played = player_status(p, songdata + "; ", song.length)
             returncode = p.wait()
 
@@ -1993,16 +2037,24 @@ def launch_player(song, songdata, cmd):
             cmd.append('--input-conf='+input_file)
             sockpath = None
 
+            stdin_in = None
             if g.mpv_usesock:
+                if has_pty:
+                    stdin_out, stdin_in = pty.openpty()
+                else:
+                    stdin_out = subprocess.PIPE
                 sockpath = tempfile.mktemp('.sock', 'mpsyt-mpv')
                 cmd.append('--input-unix-socket=' + sockpath)
                 with open(os.devnull, "w") as devnull:
-                    p = subprocess.Popen(cmd, shell=False, stderr=devnull)
+                    p = subprocess.Popen(cmd, shell=False, stdin=stdin_out, stderr=devnull)
 
             else:
                 p = subprocess.Popen(cmd, shell=False, stderr=subprocess.PIPE,
                                      bufsize=1)
-
+            if not stdin_in:
+                stdin_in = p.stdin.fileno()
+            g.redirect_thread = RedirectStdinThread(stdin_in)
+            g.redirect_thread.start()
             played = player_status(p, songdata + "; ", song.length, mpv=True,
                                    sockpath=sockpath)
             returncode = p.wait()
@@ -2011,6 +2063,7 @@ def launch_player(song, songdata, cmd):
             with open(os.devnull, "w") as devnull:
                 returncode = subprocess.call(cmd, stderr=devnull)
 
+            g.redirect_thread = None
             played = returncode == 0
 
         return (returncode, played)
@@ -2020,6 +2073,9 @@ def launch_player(song, songdata, cmd):
         return (None, None)
 
     finally:
+        if g.redirect_thread:
+            g.redirect_thread.stop()
+            g.redirect_thread = None
         try:
             os.unlink(input_file)
             if sockpath:
