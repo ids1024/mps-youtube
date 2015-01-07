@@ -76,24 +76,26 @@ except ImportError:
     has_xerox = False
 
 try:
-    import pty
-    has_pty = True
-except ImportError:
-    has_pty = False
-
-try:
     from msvcrt import getch
 except ImportError:
+    import tty
+    import termios
+    import select
     def getch():
-        import tty
-        import termios
         fd = sys.stdin.fileno()
         old = termios.tcgetattr(fd)
         mode = old.copy()
         mode[tty.LFLAG] &= ~(termios.ECHO | termios.ICANON)
         try:
             termios.tcsetattr(fd, termios.TCSAFLUSH, mode)
-            return sys.stdin.read(1)
+            char = os.read(fd, 1).decode() # sys.stdin.read interferes with select
+            # handle ANSI escape codes
+            if char == '\x1b':
+                if select.select([sys.stdin], [], [], 0)[0]:
+                    char += os.read(fd, 1).decode()
+                    if char[1] == '[' and select.select([sys.stdin], [], [], 0)[0]:
+                        char += os.read(fd, 1).decode()
+            return char
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
@@ -759,8 +761,8 @@ class Playlist(object):
 class RedirectStdinThread(threading.Thread):
     _continue = True
 
-    def __init__(self, fd):
-        self.fd = fd
+    def __init__(self, player):
+        self.player = player
         threading.Thread.__init__(self)
 
     def stop(self):
@@ -769,12 +771,184 @@ class RedirectStdinThread(threading.Thread):
     def run(self):
         while self._continue:
             char = getch()
-            os.write(self.fd, char.encode())
-            if char in 'kjqpn':
+            if char == '\x1b[D': # left
+                self.player.send_cmd(['seek', -5])
+            elif char == '\x1b[C': # right
+                self.player.send_cmd(['seek', 5])
+            elif char == ' ':
+                if isinstance(self.player, Mpv):
+                    self.player.send_cmd(['cycle', 'pause'])
+                else:
+                    self.player.send_cmd(['pause'])
+            elif char == 'm':
+                self.player.send_cmd(['cycle', 'mute'])
+                if isinstance(self.player, Mpv):
+                    self.player.send_cmd(['cycle', 'mute'])
+                else:
+                    self.player.send_cmd(['mute'])
+            elif char in ('9/'):
+                if isinstance(self.player, Mpv):
+                    self.player.send_cmd(['add', 'volume', -2])
+                else:
+                    self.player.send_cmd(['volume', -2])
+            elif char in ('0*'):
+                if isinstance(self.player, Mpv):
+                    self.player.send_cmd(['add', 'volume', 2])
+                else:
+                    self.player.send_cmd(['volume', 2])
+            elif char in 'kp':
+                self.player.send_cmd(['quit', 42])
                 break
-            if char == '\x1b': # esc
+            elif char in 'jn':
+                self.player.send_cmd(['quit'])
+                break
+            elif char == 'q':
+                self.player.send_cmd(['quit', 43])
+                break
+            elif char == '\x1b': # esc
                 g.player_to_background = True
                 break
+
+
+class Player(object):
+    re_volume = re.compile(r"Volume:\s*(?P<volume>\d+)\s*%")
+    redirect_thread = None
+
+    def output_times(self):
+        buff = ''
+        elapsed_s = volume_level = None
+
+        while self.p.poll() is None:
+            char = self.stdstream.read(1).decode("utf-8", errors="ignore")
+
+            if char in '\r\n':
+
+                mv = self.re_volume.search(buff)
+
+                if mv:
+                    volume_level = int(mv.group("volume"))
+
+                m = self.re_player.match(buff)
+
+                if m:
+                    try:
+                        h, m, s = map(int, m.groups())
+                        elapsed_s = h * 3600 + m * 60 + s
+
+                    except ValueError:
+
+                        try:
+                            elapsed_s = int(m.group('elapsed_s') or '0')
+
+                        except ValueError:
+                            pass
+
+                if elapsed_s:
+                    yield elapsed_s, volume_level
+                buff = ''
+
+            else:
+                buff += char
+
+    def wait(self):
+        return self.p.wait()
+
+    def send_cmd(self, cmd):
+        self.p.stdin.write(' '.join(str(i) for i in cmd).encode() + b'\n')
+        self.p.stdin.flush()
+
+    def redirect_stdin(self):
+        if not (self.redirect_thread and self.redirect_thread._continue):
+            self.redirect_thread = RedirectStdinThread(self)
+            self.redirect_thread.start()
+
+    def unredirect_stdin(self):
+        if self.redirect_thread:
+            self.redirect_thread.stop()
+
+
+class Mpv(Player):
+    re_player = re.compile(r".{,15}AV?:\s*(\d\d):(\d\d):(\d\d)")
+    sockpath = None
+    s = None
+
+    def __init__(self, cmd):
+        if g.mpv_usesock:
+            self.sockpath = tempfile.mktemp('.sock', 'mpsyt-mpv')
+            cmd.append('--input-unix-socket=' + self.sockpath)
+            with open(os.devnull, "w") as devnull:
+                self.p = subprocess.Popen(cmd, shell=False, stdin=devnull,
+                                          stderr=devnull)
+            time.sleep(1)
+            self.s = socket.socket(socket.AF_UNIX)
+            self.s.connect(self.sockpath)
+            self.send_cmd(["observe_property", 1, "time-pos"])
+            self.send_cmd(["observe_property", 2, "volume"])
+            self.infile = self.outfile = self.s.makefile()
+        else:
+            cmd.append('--slave-broken')
+            self.p = subprocess.Popen(cmd, shell=False, stdin=subprocess.PIPE,
+                                      stderr=subprocess.PIPE, bufsize=1)
+            self.infile = self.p.stdin
+            self.outfile = self.p.stderr
+            self.stdstream = self.p.stderr
+        self.redirect_stdin()
+
+    def output_times(self):
+        if self.s:
+            with self.s.makefile() as file:
+                elapsed_s = volume_level = None
+                for line in file:
+                    resp = json.loads(line)
+                    if resp.get('event') == 'property-change' and resp['id'] == 1:
+                        elapsed_s = int(resp['data'])
+                    if resp.get('event') == 'property-change' and resp['id'] == 2:
+                        volume_level = int(resp['data'])
+                    if elapsed_s:
+                        yield elapsed_s, volume_level
+
+        else:
+            yield from Player.output_times(self)
+
+    def send_cmd(self, cmd):
+        if self.s:
+            self.s.send(json.dumps({'command': cmd}).encode() + b'\n')
+        else:
+            return Player.send_cmd(self, cmd)
+
+    def close(self):
+        self.unredirect_stdin()
+        try:
+            if self.s:
+                os.unlink(self.sockpath)
+
+            if not g.player_to_background:
+                self.p.terminate()  # make sure to kill mplayer if mpsyt crashes
+
+        except (OSError, AttributeError, UnboundLocalError):
+            pass
+
+
+class Mplayer(Player):
+    re_player = re.compile(r"A:\s*(?P<elapsed_s>\d+)\.\d\s*")
+
+    def __init__(self, cmd):
+        cmd.append('-slave')
+        self.p = subprocess.Popen(cmd, shell=False, stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, bufsize=1)
+        self.stdstream = self.p.stdout
+        self.redirect_stdin()
+
+
+    def close(self):
+        self.unredirect_stdin()
+        try:
+            if not g.player_to_background:
+                self.p.terminate()  # make sure to kill mplayer if mpsyt crashes
+
+        except (OSError, AttributeError, UnboundLocalError):
+            pass
 
 
 class g(object):
@@ -2020,175 +2194,65 @@ def launch_player(song, songdata, cmd):
     if known_player_set() and mswin and sys.version_info[:2] < (3, 0):
         cmd = [x.encode("utf8", errors="replace") for x in cmd]
 
+    player = None
     try:
-        with tempfile.NamedTemporaryFile('w', prefix='mpsyt-input',
-                                         delete=False) as file:
-            file.write('k quit 42\nj quit\nq quit 43\np quit 42\nn quit\n')
-            input_file = file.name
-
         if "mplayer" in Config.PLAYER.get:
-            cmd.append('-input')
-            cmd.append('conf='+input_file)
-            p = subprocess.Popen(cmd, shell=False, stdin=subprocess.PIPE,
-                                 stdout=subprocess.PIPE,
-                                 stderr=subprocess.STDOUT, bufsize=1)
-            g.redirect_thread = RedirectStdinThread(p.stdin.fileno())
-            g.redirect_thread.start()
-            played = player_status(p, songdata + "; ", song.length)
+            player = Mplayer(cmd)
+            played = player_status(player, songdata + "; ", song.length)
             if g.player_to_background:
                 returncode = 'background' 
             else:
-                returncode = p.wait()
+                returncode = player.wait()
 
         elif "mpv" in Config.PLAYER.get:
-            cmd.append('--input-conf='+input_file)
-            sockpath = None
-
-            stdin_in = None
-            if g.mpv_usesock:
-                if has_pty:
-                    stdin_out, stdin_in = pty.openpty()
-                else:
-                    stdin_out = subprocess.PIPE
-                sockpath = tempfile.mktemp('.sock', 'mpsyt-mpv')
-                cmd.append('--input-unix-socket=' + sockpath)
-                with open(os.devnull, "w") as devnull:
-                    p = subprocess.Popen(cmd, shell=False, stdin=stdin_out, stderr=devnull)
-
-            else:
-                p = subprocess.Popen(cmd, shell=False, stderr=subprocess.PIPE,
-                                     bufsize=1)
-            if not stdin_in:
-                stdin_in = p.stdin.fileno()
-            g.redirect_thread = RedirectStdinThread(stdin_in)
-            g.redirect_thread.start()
-            played = player_status(p, songdata + "; ", song.length, mpv=True,
-                                   sockpath=sockpath)
+            player = Mpv(cmd)
+            played = player_status(player, songdata + "; ", song.length)
             if g.player_to_background:
                 returncode = 'background'
             else:
-                returncode = p.wait()
+                returncode = player.wait()
 
         else:
             with open(os.devnull, "w") as devnull:
                 returncode = subprocess.call(cmd, stderr=devnull)
 
-            g.redirect_thread = None
             played = returncode == 0
 
         return (returncode, played)
 
-    except OSError:
+    except FileNotFoundError:
         g.message = F('no player') % Config.PLAYER.get
         return (None, None)
 
     finally:
-        if g.redirect_thread:
-            g.redirect_thread.stop()
-            g.redirect_thread = None
-        try:
-            os.unlink(input_file)
-            if sockpath:
-                os.unlink(sockpath)
-
-            if not g.player_to_background:
-                p.terminate()  # make sure to kill mplayer if mpsyt crashes
-
-        except (OSError, AttributeError, UnboundLocalError):
-            pass
+        if player:
+            player.close()
         g.player_to_background = False
 
 
-def player_status(po_obj, prefix, songlength=0, mpv=False, sockpath=None):
+def player_status(player, prefix, songlength=0):
     """ Capture time progress from player output. Write status line. """
     # pylint: disable=R0914
     played_something = False
-    re_mplayer = re.compile(r"A:\s*(?P<elapsed_s>\d+)\.\d\s*")
-    re_mpv = re.compile(r".{,15}AV?:\s*(\d\d):(\d\d):(\d\d)")
-    re_volume = re.compile(r"Volume:\s*(?P<volume>\d+)\s*%")
-    re_player = re_mpv if mpv else re_mplayer
     last_displayed_line = None
-    buff = ''
-    volume_level = None
 
-    if sockpath:
-        time.sleep(1)
-        try:
-            s = socket.socket(socket.AF_UNIX)
-            s.connect(sockpath)
-            cmd = {"command": ["observe_property", 1, "time-pos"]}
-            s.send(json.dumps(cmd).encode() + b'\n')
-            cmd = {"command": ["observe_property", 2, "volume"]}
-            s.send(json.dumps(cmd).encode() + b'\n')
-            volume_level = m = None
-            for line in s.makefile():
-                played_something = True
-                resp = json.loads(line)
-                if resp.get('event') == 'property-change' and resp['id'] == 1:
-                    m = int(resp['data'])
-                elif resp.get('event') == 'property-change' and resp['id'] == 2:
-                    volume_level = int(resp['data'])
-                if m:
-                    line = make_status_line(m, prefix, songlength,
-                                            volume=volume_level)
+    for elapsed_s, volume_level in player.output_times():
+        played_something = True
+        line = make_status_line(elapsed_s, prefix, songlength,
+                                volume=volume_level)
 
-                    if line != last_displayed_line:
-                        writestatus(line)
-                        last_displayed_line = line
-                if g.player_to_background:
-                    break
-        except socket.error:
-            pass
-
-    else:
-        while po_obj.poll() is None and not g.player_to_background:
-            stdstream = po_obj.stderr if mpv else po_obj.stdout
-            char = stdstream.read(1).decode("utf-8", errors="ignore")
-
-            if char in '\r\n':
-
-                mv = re_volume.search(buff)
-
-                if mv:
-                    volume_level = int(mv.group("volume"))
-
-                m = re_player.match(buff)
-
-                if m:
-                    played_something = True
-                    line = make_status_line(m, prefix, songlength,
-                                            volume=volume_level)
-
-                    if line != last_displayed_line:
-                        writestatus(line)
-                        last_displayed_line = line
-
-                buff = ''
-
-            else:
-                buff += char
+        if line != last_displayed_line:
+            writestatus(line)
+            last_displayed_line = line
+        if g.player_to_background:
+            break
 
     return played_something
 
 
-def make_status_line(match_object, prefix, songlength=0, volume=None):
+def make_status_line(elapsed_s, prefix, songlength=0, volume=None):
     """ Format progress line output.  """
     # pylint: disable=R0914
-    if isinstance(match_object, int):
-        elapsed_s = match_object
-    else:
-        try:
-            h, m, s = map(int, match_object.groups())
-            elapsed_s = h * 3600 + m * 60 + s
-
-        except ValueError:
-
-            try:
-                elapsed_s = int(match_object.group('elapsed_s') or '0')
-
-            except ValueError:
-                return ""
-
     display_s = elapsed_s
     display_h = display_m = 0
 
