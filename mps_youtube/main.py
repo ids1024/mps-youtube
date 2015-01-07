@@ -918,15 +918,9 @@ class Mpv(Player):
 
     def close(self):
         self.unredirect_stdin()
-        try:
-            if self.s:
-                os.unlink(self.sockpath)
-
-            if not g.player_to_background:
-                self.p.terminate()  # make sure to kill mplayer if mpsyt crashes
-
-        except (OSError, AttributeError, UnboundLocalError):
-            pass
+        self.p.terminate()
+        if self.s:
+            os.unlink(self.sockpath)
 
 
 class Mplayer(Player):
@@ -943,12 +937,7 @@ class Mplayer(Player):
 
     def close(self):
         self.unredirect_stdin()
-        try:
-            if not g.player_to_background:
-                self.p.terminate()  # make sure to kill mplayer if mpsyt crashes
-
-        except (OSError, AttributeError, UnboundLocalError):
-            pass
+        self.p.terminate()
 
 
 class g(object):
@@ -971,8 +960,8 @@ class g(object):
     mpv_usesock = False
     browse_mode = "normal"
     preloading = []
-    redirect_thread = None
     player_to_background = False
+    player = None
     # expiry = 5 * 60 * 60  # 5 hours
     blank_text = "\n" * 200
     helptext = []
@@ -2194,23 +2183,22 @@ def launch_player(song, songdata, cmd):
     if known_player_set() and mswin and sys.version_info[:2] < (3, 0):
         cmd = [x.encode("utf8", errors="replace") for x in cmd]
 
-    player = None
     try:
         if "mplayer" in Config.PLAYER.get:
-            player = Mplayer(cmd)
-            played = player_status(player, songdata + "; ", song.length)
+            g.player = Mplayer(cmd)
+            played = player_status(songdata + "; ", song.length)
             if g.player_to_background:
                 returncode = 'background' 
             else:
-                returncode = player.wait()
+                returncode = g.player.wait()
 
         elif "mpv" in Config.PLAYER.get:
-            player = Mpv(cmd)
-            played = player_status(player, songdata + "; ", song.length)
+            g.player = Mpv(cmd)
+            played = player_status(songdata + "; ", song.length)
             if g.player_to_background:
                 returncode = 'background'
             else:
-                returncode = player.wait()
+                returncode = g.player.wait()
 
         else:
             with open(os.devnull, "w") as devnull:
@@ -2225,18 +2213,19 @@ def launch_player(song, songdata, cmd):
         return (None, None)
 
     finally:
-        if player:
-            player.close()
+        if g.player and not g.player_to_background:
+            g.player.close()
+            g.player = None
         g.player_to_background = False
 
 
-def player_status(player, prefix, songlength=0):
+def player_status(prefix, songlength=0):
     """ Capture time progress from player output. Write status line. """
     # pylint: disable=R0914
     played_something = False
     last_displayed_line = None
 
-    for elapsed_s, volume_level in player.output_times():
+    for elapsed_s, volume_level in g.player.output_times():
         played_something = True
         line = make_status_line(elapsed_s, prefix, songlength,
                                 volume=volume_level)
@@ -4425,36 +4414,43 @@ def main():
     arg_inp = arg_inp.replace(r",,", "[mpsyt-comma]")
     arg_inp = arg_inp.split(",")
 
-    while True:
-        next_inp = ""
+    try:
+        while True:
+            next_inp = ""
 
-        if len(arg_inp):
-            arg_inp, next_inp = arg_inp[1:], arg_inp[0].strip()
-            next_inp = next_inp.replace("[mpsyt-comma]", ",")
+            if len(arg_inp):
+                arg_inp, next_inp = arg_inp[1:], arg_inp[0].strip()
+                next_inp = next_inp.replace("[mpsyt-comma]", ",")
 
-        try:
-            userinput = next_inp or xinput(prompt).strip()
+            try:
+                userinput = next_inp or xinput(prompt).strip()
 
-        except (KeyboardInterrupt, EOFError):
-            userinput = prompt_for_exit()
+            except (KeyboardInterrupt, EOFError):
+                userinput = prompt_for_exit()
 
-        for k, v in regx.items():
-            if matchfunction(k, v, userinput):
-                break
+            for k, v in regx.items():
+                if matchfunction(k, v, userinput):
+                    break
 
-        else:
-            g.content = g.content or generate_songlist_display()
+            else:
+                g.content = g.content or generate_songlist_display()
 
-            if g.command_line:
-                g.content = ""
+                if g.command_line:
+                    g.content = ""
 
-            if userinput and not g.command_line:
-                g.message = c.b + "Bad syntax. Enter h for help" + c.w
+                if userinput and not g.command_line:
+                    g.message = c.b + "Bad syntax. Enter h for help" + c.w
 
-            elif userinput and g.command_line:
-                sys.exit("Bad syntax")
+                elif userinput and g.command_line:
+                    sys.exit("Bad syntax")
 
-        screen_update()
+            screen_update()
+    finally:
+        cleanup()
+
+def cleanup():
+    if g.player:
+        g.player.close()
 
 if "--debug" in sys.argv or os.environ.get("mpsytdebug") == "1":
     xprint(get_version_info())
