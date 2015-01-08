@@ -780,6 +780,10 @@ class RedirectStdinThread(threading.Thread):
             os.write(self.fd, char.encode())
             if char in 'kjqpn':
                 break
+            elif char == '\x1b':
+                g.player_in_foreground = False
+                g.resumeMainThread.set()
+                break
 
 
 class g(object):
@@ -803,6 +807,8 @@ class g(object):
     browse_mode = "normal"
     preloading = []
     redirect_thread = None
+    resumeMainThread = threading.Event()
+    player_in_foreground = True
     # expiry = 5 * 60 * 60  # 5 hours
     blank_text = "\n" * 200
     helptext = []
@@ -2127,7 +2133,7 @@ def player_status(po_obj, prefix, songlength=0, mpv=False, sockpath=None):
                     line = make_status_line(m, prefix, songlength,
                                             volume=volume_level)
 
-                    if line != last_displayed_line:
+                    if line != last_displayed_line and g.player_in_foreground:
                         writestatus(line)
                         last_displayed_line = line
         except socket.error:
@@ -2152,7 +2158,7 @@ def player_status(po_obj, prefix, songlength=0, mpv=False, sockpath=None):
                     line = make_status_line(m, prefix, songlength,
                                             volume=volume_level)
 
-                    if line != last_displayed_line:
+                    if line != last_displayed_line and g.player_in_foreground:
                         writestatus(line)
                         last_displayed_line = line
 
@@ -3081,7 +3087,11 @@ def play(pre, choice, post=""):
                 t = threading.Thread(target=preload, kwargs=kwa)
                 t.start()
 
-        play_range(songlist, shuffle, repeat, override)
+        playthread = threading.Thread(target=play_range,
+                                     args=(songlist, shuffle, repeat, override))
+        playthread.start()
+        g.resumeMainThread.wait()
+        g.resumeMainThread.clear()
 
 
 def play_all(pre, choice, post=""):
@@ -3161,7 +3171,7 @@ def play_range(songlist, shuffle=False, repeat=False, override=False):
         song = songlist[n]
         g.content = playback_progress(n, songlist, repeat=repeat)
 
-        if not g.command_line:
+        if not g.command_line and g.player_in_foreground:
             screen_update(fill_blank=False)
 
         hasnext = len(songlist) > n + 1
@@ -3198,6 +3208,7 @@ def play_range(songlist, shuffle=False, repeat=False, override=False):
             n = 0
 
     g.content = generate_songlist_display()
+    g.resumeMainThread.set()
 
 
 def show_help(choice):
