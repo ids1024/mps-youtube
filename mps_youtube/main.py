@@ -84,16 +84,24 @@ except ImportError:
 try:
     from msvcrt import getch
 except ImportError:
+    import tty
+    import termios
+    import select
     def getch():
-        import tty
-        import termios
         fd = sys.stdin.fileno()
         old = termios.tcgetattr(fd)
         mode = old.copy()
         mode[tty.LFLAG] &= ~(termios.ECHO | termios.ICANON)
         try:
             termios.tcsetattr(fd, termios.TCSAFLUSH, mode)
-            return sys.stdin.read(1)
+            char = os.read(fd, 1).decode() # sys.stdin.read interferes with select
+            # handle ANSI escape codes
+            if char == '\x1b':
+                if select.select([sys.stdin], [], [], 0)[0]:
+                    char += os.read(fd, 1).decode()
+                    if char[1] == '[' and select.select([sys.stdin], [], [], 0)[0]:
+                        char += os.read(fd, 1).decode()
+            return char
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
