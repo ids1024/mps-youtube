@@ -777,12 +777,12 @@ class RedirectStdinThread(threading.Thread):
     def run(self):
         while self._continue:
             char = getch()
-            os.write(self.fd, char.encode())
-            if char in 'kjqpn':
-                break
-            elif char == '\x1b':
+            if char == '\x1b':
                 g.player_in_foreground = False
                 g.resumeMainThread.set()
+                break
+            os.write(self.fd, char.encode())
+            if char in 'kjqpn':
                 break
 
 
@@ -808,6 +808,7 @@ class g(object):
     preloading = []
     redirect_thread = None
     resumeMainThread = threading.Event()
+    last_playback_progress = ''
     player_in_foreground = True
     # expiry = 5 * 60 * 60  # 5 hours
     blank_text = "\n" * 200
@@ -3125,6 +3126,19 @@ def vp():
     g.content = generate_songlist_display(zeromsg=g.message)
 
 
+def fg():
+    if not g.redirect_thread:
+        return
+    g.content = g.last_playback_progress
+    if not g.command_line:
+        screen_update(fill_blank=False)
+    g.player_in_foreground = True
+    g.redirect_thread = RedirectStdinThread(g.redirect_thread.fd)
+    g.redirect_thread.start()
+    g.resumeMainThread.wait()
+    g.resumeMainThread.clear()
+
+
 def preload(song, delay=2, override=False):
     """  Get streams (runs in separate thread). """
     if g.preload_disabled:
@@ -3169,7 +3183,8 @@ def play_range(songlist, shuffle=False, repeat=False, override=False):
     n = 0
     while 0 <= n <= len(songlist)-1:
         song = songlist[n]
-        g.content = playback_progress(n, songlist, repeat=repeat)
+        g.last_playback_progress = playback_progress(n, songlist, repeat=repeat)
+        g.content = g.last_playback_progress
 
         if not g.command_line and g.player_in_foreground:
             screen_update(fill_blank=False)
@@ -4317,6 +4332,7 @@ def main():
     regx = {
         'ls': r'ls$',
         'vp': r'vp$',
+        'fg': r'fg$',
         'top': r'top(|3m|6m|year|all)\s*$',
         'dump': r'(un)?dump',
         'play': r'(%s{0,3})([-,\d\s]{1,250})\s*(%s{0,3})$' % (rs, rs),
