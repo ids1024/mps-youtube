@@ -104,7 +104,8 @@ except ImportError:
             if char == b'\x1b':
                 if select.select([sys.stdin], [], [], 0)[0]:
                     char += os.read(fd, 1)
-                    if char[1] == '[' and select.select([sys.stdin], [], [], 0)[0]:
+                    # 91 is '['
+                    if char[1] == 91 and select.select([sys.stdin], [], [], 0)[0]:
                         char += os.read(fd, 1)
             return char
         finally:
