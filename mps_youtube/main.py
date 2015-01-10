@@ -2060,8 +2060,8 @@ def launch_player(song, songdata, cmd):
                     p = subprocess.Popen(cmd, shell=False, stdin=stdin_out, stderr=devnull)
 
             else:
-                p = subprocess.Popen(cmd, shell=False, stderr=subprocess.PIPE,
-                                     bufsize=1)
+                p = subprocess.Popen(cmd, shell=False, stdin=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, bufsize=1)
             if not stdin_in:
                 stdin_in = p.stdin.fileno()
             g.redirect_thread = RedirectStdinThread(stdin_in)
