@@ -83,7 +83,15 @@ except ImportError:
 
 try:
     import msvcrt
-    def getch():
+    def getch_setup():
+        pass
+
+    def getch_cleanup(old):
+        pass
+
+    def getch(nonblock=False):
+        if nonblock and msvcrt.kbhit():
+            return
         char = msvcrt.getch()
         if char in b'\000\xe0':
             char += msvcrt.getch()
@@ -92,24 +100,31 @@ except ImportError:
     import tty
     import termios
     import select
-    def getch():
+    def getch_setup():
         fd = sys.stdin.fileno()
         old = termios.tcgetattr(fd)
         mode = old.copy()
         mode[tty.LFLAG] &= ~(termios.ECHO | termios.ICANON)
-        try:
-            termios.tcsetattr(fd, termios.TCSAFLUSH, mode)
-            char = os.read(fd, 1) # sys.stdin.read interferes with select
-            # handle ANSI escape codes
-            if char == b'\x1b':
-                if select.select([sys.stdin], [], [], 0)[0]:
+        termios.tcsetattr(fd, termios.TCSAFLUSH, mode)
+        return old
+
+    def getch_cleanup(old):
+        fd = sys.stdin.fileno()
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+    def getch(nonblock=False):
+        fd = sys.stdin.fileno()
+        if nonblock and not select.select([sys.stdin], [], [], 0)[0]:
+            return
+        char = os.read(fd, 1) # sys.stdin.read interferes with select
+        # handle ANSI escape codes
+        if char == b'\x1b':
+            if select.select([sys.stdin], [], [], 0)[0]:
+                char += os.read(fd, 1)
+                # 91 is '['
+                if char[1] == 91 and select.select([sys.stdin], [], [], 0)[0]:
                     char += os.read(fd, 1)
-                    # 91 is '['
-                    if char[1] == 91 and select.select([sys.stdin], [], [], 0)[0]:
-                        char += os.read(fd, 1)
-            return char
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        return char
 
 # Python 3 compatibility hack
 
@@ -781,15 +796,23 @@ class RedirectStdinThread(threading.Thread):
         self._continue = False
 
     def run(self):
-        while self._continue:
-            char = getch()
-            if char == b'\x1b':
-                g.player_in_foreground = False
-                g.resumeMainThread.set()
-                break
-            os.write(self.fd, char)
-            if char in b'kjqpn':
-                break
+        old = getch_setup()
+        try:
+            while self._continue:
+                char = getch(nonblock=True)
+                if not char:
+                    time.sleep(.05)
+                    continue
+                if char == b'\x1b':
+                    g.player_in_foreground = False
+                    g.resumeMainThread.set()
+                    break
+                try:
+                    os.write(self.fd, char)
+                except OSError:
+                    break
+        finally:
+            getch_cleanup(old)
 
 
 class g(object):
@@ -2097,6 +2120,9 @@ def launch_player(song, songdata, cmd):
         if g.redirect_thread:
             g.redirect_thread.stop()
             g.redirect_thread = None
+        if g.mpv_usesock and has_pty:
+            os.close(stdin_out)
+            os.close(stdin_in)
         try:
             os.unlink(input_file)
             if sockpath:
