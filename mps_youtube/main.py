@@ -94,13 +94,13 @@ except ImportError:
         mode[tty.LFLAG] &= ~(termios.ECHO | termios.ICANON)
         try:
             termios.tcsetattr(fd, termios.TCSAFLUSH, mode)
-            char = os.read(fd, 1).decode() # sys.stdin.read interferes with select
+            char = os.read(fd, 1) # sys.stdin.read interferes with select
             # handle ANSI escape codes
-            if char == '\x1b':
+            if char == b'\x1b':
                 if select.select([sys.stdin], [], [], 0)[0]:
-                    char += os.read(fd, 1).decode()
+                    char += os.read(fd, 1)
                     if char[1] == '[' and select.select([sys.stdin], [], [], 0)[0]:
-                        char += os.read(fd, 1).decode()
+                        char += os.read(fd, 1)
             return char
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
@@ -777,12 +777,12 @@ class RedirectStdinThread(threading.Thread):
     def run(self):
         while self._continue:
             char = getch()
-            if char == '\x1b':
+            if char == b'\x1b':
                 g.player_in_foreground = False
                 g.resumeMainThread.set()
                 break
-            os.write(self.fd, char.encode())
-            if char in 'kjqpn':
+            os.write(self.fd, char)
+            if char in b'kjqpn':
                 break
 
 
