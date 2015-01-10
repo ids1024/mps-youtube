@@ -82,7 +82,12 @@ except ImportError:
     has_pty = False
 
 try:
-    from msvcrt import getch
+    import msvcrt
+    def getch():
+        char = msvcrt.getch()
+        if char in b'\000\xe0':
+            char += msvcrt.getch()
+        return char
 except ImportError:
     import tty
     import termios
