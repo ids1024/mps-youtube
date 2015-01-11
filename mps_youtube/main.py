@@ -83,13 +83,13 @@ except ImportError:
 
 try:
     import msvcrt
-    def getch_setup():
+    def getkey_setup():
         pass
 
-    def getch_cleanup(old):
+    def getkey_cleanup(old):
         pass
 
-    def getch(nonblock=False):
+    def getkey(nonblock=False):
         if nonblock and not msvcrt.kbhit():
             return
         char = msvcrt.getch()
@@ -100,7 +100,7 @@ except ImportError:
     import tty
     import termios
     import select
-    def getch_setup():
+    def getkey_setup():
         fd = sys.stdin.fileno()
         old = termios.tcgetattr(fd)
         mode = old.copy()
@@ -108,11 +108,11 @@ except ImportError:
         termios.tcsetattr(fd, termios.TCSAFLUSH, mode)
         return old
 
-    def getch_cleanup(old):
+    def getkey_cleanup(old):
         fd = sys.stdin.fileno()
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
-    def getch(nonblock=False):
+    def getkey(nonblock=False):
         fd = sys.stdin.fileno()
         if nonblock and not select.select([sys.stdin], [], [], 0)[0]:
             return
@@ -796,10 +796,10 @@ class RedirectStdinThread(threading.Thread):
         self._continue = False
 
     def run(self):
-        old = getch_setup()
+        old = getkey_setup()
         try:
             while self._continue:
-                char = getch(nonblock=True)
+                char = getkey(nonblock=True)
                 if not char:
                     time.sleep(.05)
                     continue
@@ -812,7 +812,7 @@ class RedirectStdinThread(threading.Thread):
                 except OSError:
                     break
         finally:
-            getch_cleanup(old)
+            getkey_cleanup(old)
 
 
 class g(object):
