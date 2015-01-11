@@ -1954,6 +1954,7 @@ def generate_real_playerargs(song, override, failcount):
 
         if "mplayer" in Config.PLAYER.get:
             list_update("-really-quiet", args, remove=True)
+            list_update("-noquiet", args)
             list_update("-prefer-ipv4", args)
 
         elif "mpv" in Config.PLAYER.get:
