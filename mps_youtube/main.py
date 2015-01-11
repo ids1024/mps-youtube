@@ -90,7 +90,7 @@ try:
         pass
 
     def getch(nonblock=False):
-        if nonblock and msvcrt.kbhit():
+        if nonblock and not msvcrt.kbhit():
             return
         char = msvcrt.getch()
         if char in b'\000\xe0':
