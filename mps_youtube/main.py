@@ -2409,16 +2409,9 @@ def _search(url, progtext, qs=None, splash=True, pre_load=True):
             screen_update()
 
         # perform fetch
-        try:
-
-            wdata = utf8_decode(urlopen(url).read())
-            wdata = json.loads(wdata)
-            songs = get_tracks_from_json(wdata)
-
-        except (URLError, HTTPError) as e:
-            g.message = F('no data') % e
-            g.content = logo(c.r)
-            return
+        wdata = utf8_decode(urlopen(url).read())
+        wdata = json.loads(wdata)
+        songs = get_tracks_from_json(wdata)
 
     if songs and pre_load:
         # preload first result url
