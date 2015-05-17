@@ -2734,14 +2734,11 @@ def pl_search(term, page=None, splash=True, is_user=False):
             playlists = g.url_memo[url]
 
         else:
-            try:
-                wpage = utf8_decode(urlopen(url).read())
-                pldata = json.loads(wpage)
-                id_list = [i.get('id', {}).get('playlistId')
-                        for i in pldata.get('items', ())]
-                store_pagetokens_from_json(pldata)
-            except HTTPError:
-                success = False
+            wpage = utf8_decode(urlopen(url).read())
+            pldata = json.loads(wpage)
+            id_list = [i.get('id', {}).get('playlistId')
+                    for i in pldata.get('items', ())]
+            store_pagetokens_from_json(pldata)
 
     if success:
         url = "https://www.googleapis.com/youtube/v3/playlists?"
