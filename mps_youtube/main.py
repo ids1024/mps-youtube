@@ -2732,6 +2732,8 @@ def pl_search(term, page=None, splash=True, is_user=False):
             playlists = g.url_memo[url]
 
         else:
+            print(url)
+            sys.exit()
             wpage = utf8_decode(urlopen(url).read())
             pldata = json.loads(wpage)
             id_list = [i.get('id', {}).get('playlistId')
