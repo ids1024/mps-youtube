@@ -2724,6 +2724,8 @@ def pl_search(term, page=None, splash=True, is_user=False):
         if max_results > 50: # Limit for playlists command
             max_results = 50
         qs = generate_search_qs(term, page, result_count=max_results)
+        if 'videoCategoryId' in qs:
+            del qs['videoCategoryId'] # Incompatable with type=playlist
         qs['type'] = 'playlist'
 
         url += urlencode(qs)
@@ -2732,8 +2734,6 @@ def pl_search(term, page=None, splash=True, is_user=False):
             playlists = g.url_memo[url]
 
         else:
-            print(url)
-            sys.exit()
             wpage = utf8_decode(urlopen(url).read())
             pldata = json.loads(wpage)
             id_list = [i.get('id', {}).get('playlistId')
